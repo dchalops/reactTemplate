@@ -1,0 +1,954 @@
+dotnet new sln -n OrdersSolution
+dotnet new webapi -n Orders.Api
+dotnet new classlib -n Orders.Application
+dotnet new classlib -n Orders.Domain
+dotnet new classlib -n Orders.Infrastructure
+dotnet sln add Orders.Api Orders.Application Orders.Domain Orders.Infrastructure
+dotnet add package Microsoft.EntityFrameworkCore.Design
+
+dotnet add Orders.Infrastructure package Microsoft.EntityFrameworkCore.SqlServer
+dotnet add Orders.Infrastructure package Microsoft.EntityFrameworkCore.Design
+dotnet add Orders.Api package Swashbuckle.AspNetCore
+
+dotnet add Orders.Infrastructure package Microsoft.Extensions.Configuration
+dotnet add Orders.Infrastructure package Microsoft.Extensions.Configuration.Json
+dotnet add Orders.Infrastructure package Microsoft.Extensions.Configuration.Binder
+
+
+Crea Orders.Domain/Entities/Order.cs
+
+using System;
+
+namespace Orders.Domain.Entities
+{
+    public class Order : BaseEntity
+	{
+		public Guid ID { get; set; } = Guid.NewGuid();
+		public Guid ClientID { get; set; }
+
+		[ForeignKey("ClientID")]
+		public Client Client { get; set; }
+
+		[Column(TypeName = "decimal(18,2)")]
+		public decimal Monto { get; set; }
+
+		public DateTime Date { get; set; } = DateTime.UtcNow;
+	}
+}
+
+
+Crea Orders.Domain/Entities/Cliente.cs:
+
+namespace Orders.Domain.Entities
+{
+    public class Client : BaseEntity
+	{
+		[Key]
+		public Guid ID { get; set; } = Guid.NewGuid();
+		public string name { get; set; }
+		public ICollection<Order> Orders { get; set; } = new List<Order>();
+	}
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Orders.Domain.Entities
+{
+    public abstract class BaseEntity
+    {
+        public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+        public string? CreatedBy { get; set; }
+        public DateTime? UpdatedAt { get; set; }
+        public string? UpdatedBy { get; set; }
+        public bool IsDeleted { get; set; } = false;
+    }
+}
+
+
+
+Crea Orders.Infrastructure/Persistence/ApplicationDbContext.cs:
+
+using Microsoft.EntityFrameworkCore;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using Orders.Domain.Entities;
+
+using Microsoft.EntityFrameworkCore;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using Orders.Domain.Entities;
+
+namespace Orders.Infrastructure.Persistence
+{
+    public class ApplicationDbContext : DbContext
+    {
+        public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : base(options) { }
+
+        public DbSet<Order> Orders { get; set; }
+        public DbSet<Client> Clients { get; set; }
+        public ApplicationDbContext() { }
+		protected override void OnModelCreating(ModelBuilder modelBuilder)
+		{
+			modelBuilder.Entity<Order>().HasQueryFilter(o => !o.IsDeleted);
+			modelBuilder.Entity<Order>()
+				.HasOne(o => o.Client)
+				.WithMany(c => c.Orders)
+				.HasForeignKey(o => o.ClientID);
+
+			base.OnModelCreating(modelBuilder);
+
+		}
+        
+    }
+}
+
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Design;
+using Microsoft.Extensions.Configuration;
+using Orders.Infrastructure.Persistence;
+using System.IO;
+
+public class DesignTimeDbContextFactory : IDesignTimeDbContextFactory<ApplicationDbContext>
+{
+    public ApplicationDbContext CreateDbContext(string[] args)
+    {
+        var configuration = new ConfigurationBuilder()
+            .SetBasePath(Directory.GetCurrentDirectory())
+            .AddJsonFile("appsettings.json")
+            .Build();
+
+        var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
+        optionsBuilder.UseSqlServer(configuration.GetConnectionString("DefaultConnection"));
+
+        return new ApplicationDbContext(optionsBuilder.Options);
+    }
+}
+
+
+
+Configura la base de datos en Orders.Api/appsettings.json:
+"ConnectionStrings": {
+  "DefaultConnection": "Server=localhost,1433;Database=OrdersDB;User Id=sa;Password=Chalo2130198720;TrustServerCertificate=True;"
+},
+"runtimeOptions": {
+  "configProperties": {
+    "System.Globalization.Invariant": false
+  }
+},
+"Cors": {
+    "AllowedOrigins": ["http://localhost:3000"]
+  }
+
+
+Crea Orders.Infrastructure/Repositories/OrderRepository.cs:
+
+using Microsoft.EntityFrameworkCore;
+using Orders.Domain.Entities;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Orders.Infrastructure.Repositories
+{
+    public class OrderRepository
+    {
+        private readonly ApplicationDbContext _context;
+
+        public OrderRepository(ApplicationDbContext context)
+		{
+			_context = context;
+		}
+
+		public async Task<List<Order>> GetOrdersAsync()
+		{
+			return await _context.Orders
+				.Include(o => o.Client)
+				.ToListAsync();
+		}
+
+		public async Task<Order> GetOrderByIdAsync(Guid id)
+		{
+			
+			var orders = await _context.Orders
+                .Include(o => o.Client)
+                .ToListAsync();
+			return orders.FirstOrDefault(o => o.ID == id);
+			
+		}
+
+		public async Task AddOrderAsync(Order order)
+		{
+			_context.Orders.Add(order);
+			await _context.SaveChangesAsync();
+		}
+
+		public async Task UpdateOrderAsync(Order order)
+		{
+			var existingOrder = await _context.Orders.FindAsync(order.ID);
+
+			if (existingOrder != null)
+			{
+				_context.Entry(existingOrder).State = EntityState.Detached; // Desadjuntar la entidad existente
+			}
+
+			_context.Entry(order).State = EntityState.Modified;
+			await _context.SaveChangesAsync();
+		}
+
+
+		public async Task DeleteOrderAsync(Guid id)
+		{
+			var existingOrder = await _context.Orders.FindAsync(id);
+
+			if (existingOrder != null)
+			{
+				_context.Entry(existingOrder).State = EntityState.Detached; // Desadjuntar la entidad existente
+			}
+
+			existingOrder.IsDeleted = true;
+			_context.Entry(existingOrder).State = EntityState.Modified;
+			await _context.SaveChangesAsync();
+		}
+    }
+}
+
+
+Crea Orders.Application/Services/OrderService.cs:
+using Orders.Domain.Entities;
+using Orders.Infrastructure.Repositories;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Orders.Application.Services
+{
+    public class OrderService
+    {
+        private readonly OrderRepository _orderRepository;
+
+        public OrderService(OrderRepository orderRepository)
+		{
+			_orderRepository = orderRepository;
+		}
+
+		public async Task<List<Order>> GetOrdersAsync()
+		{
+			return await _orderRepository.GetOrdersAsync();
+		}
+
+		public async Task<Order> GetOrderByIdAsync(Guid id)
+		{
+			return await _orderRepository.GetOrderByIdAsync(id);
+		}
+
+		public async Task AddOrderAsync(Order order)
+		{
+			await _orderRepository.AddOrderAsync(order);
+		}
+
+		public async Task UpdateOrderAsync(Order order)
+		{
+			await _orderRepository.UpdateOrderAsync(order);
+		}
+
+		public async Task DeleteOrderAsync(Guid id)
+		{
+			await _orderRepository.DeleteOrderAsync(id);
+		}
+    }
+}
+
+Crea Orders.Api/Controllers/OrdersController.cs:
+
+using Microsoft.AspNetCore.Mvc;
+using Orders.Application.Services;
+using Orders.Domain.Entities;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+
+namespace Orders.Api.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+	[EnableCors("AllowReactApp")] 
+    public class OrdersController : ControllerBase
+    {
+        private readonly OrderService _orderService;
+        private readonly ILogger<OrdersController> _logger;
+
+        public OrdersController(OrderService orderService, ILogger<OrdersController> logger)
+		{
+			_orderService = orderService;
+			_logger = logger;
+		}
+
+		[HttpGet]
+		public async Task<ActionResult<List<Order>>> GetOrders()
+		{
+			try
+			{
+				var orders = await _orderService.GetOrdersAsync();
+				return Ok(orders);
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Error al obtener los pedidos.");
+				return StatusCode(500, new { message = "Ocurrió un error al obtener los pedidos." });
+			}
+		}
+
+		[HttpPost]
+		public async Task<ActionResult> CreateOrder([FromBody] Order order)
+		{
+			try
+			{
+				if (order == null)
+				{
+					return BadRequest(new { message = "El pedido no puede estar vacío." });
+				}
+
+				await _orderService.AddOrderAsync(order);
+				return CreatedAtAction(nameof(GetOrders), new { id = order.ID }, order);
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Error al crear un pedido.");
+				return StatusCode(500, new { message = "Ocurrió un error al crear el pedido." + ex.Message });
+			}
+		}
+
+		[HttpGet("{id}")]
+		public async Task<ActionResult<Order>> GetOrderById(Guid id)
+		{
+			try
+			{
+				var order = await _orderService.GetOrderByIdAsync(id);
+				if (order == null)
+				{
+					return NotFound(new { message = "El pedido no existe." });
+				}
+
+				return Ok(order);
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Error al obtener el pedido.");
+				return StatusCode(500, new { message = "Ocurrió un error al obtener el pedido." });
+			}
+		}
+
+		[HttpPut("{id}")]
+		public async Task<ActionResult> UpdateOrder(Guid id, [FromBody] Order order)
+		{
+			try
+			{
+				if (order == null)
+				{
+					return BadRequest(new { message = "El pedido no puede estar vacío." });
+				}
+
+				if (id != order.ID)
+				{
+					return BadRequest(new { message = "El ID del pedido no coincide." });
+				}
+
+				var existingOrder = await _orderService.GetOrderByIdAsync(id);
+				if (existingOrder == null)
+				{
+					return NotFound(new { message = "El pedido no existe." });
+				}
+
+				await _orderService.UpdateOrderAsync(order);
+				return NoContent();
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Error al actualizar el pedido.");
+				return StatusCode(500, new { message = "Ocurrió un error al actualizar el pedido." });
+			}
+		}
+
+		[HttpPut("delete/{id}")]
+		public async Task<ActionResult> DeleteOrder(Guid id)
+		{
+			try
+			{
+				await _orderService.DeleteOrderAsync(id);
+				return NoContent();
+			}
+			catch (Exception ex)
+			{
+				_logger.LogError(ex, "Error al eliminar el pedido.");
+				return StatusCode(500, new { message = "Ocurrió un error al eliminar el pedido." });
+			}
+		}
+    }
+}
+
+
+
+En Orders.Api/Program.cs, agrega:
+using Microsoft.EntityFrameworkCore;
+using Orders.Application.Services;
+using Orders.Infrastructure.Persistence;
+using Orders.Infrastructure.Repositories;
+using System.Globalization;
+
+CultureInfo.DefaultThreadCurrentCulture = new CultureInfo("en-US");
+CultureInfo.DefaultThreadCurrentUICulture = new CultureInfo("en-US");
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllers();
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseSqlServer(
+        builder.Configuration.GetConnectionString("DefaultConnection"),
+        b => b.MigrationsAssembly("Orders.Infrastructure")
+    )
+);
+
+builder.Services.AddScoped<OrderRepository>();
+builder.Services.AddScoped<OrderService>();
+
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.Preserve;
+        options.JsonSerializerOptions.WriteIndented = true;
+    });
+	
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
+        options.JsonSerializerOptions.WriteIndented = true;
+    });
+	
+var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowReactApp",
+        policy =>
+        {
+            policy.WithOrigins(allowedOrigins)
+                  .AllowAnyMethod()
+                  .AllowAnyHeader()
+                  .AllowCredentials();
+        });
+});
+
+app.UseCors("AllowReactApp");
+
+app.UseRouting();
+app.UseEndpoints(endpoints =>
+{
+    endpoints.MapControllers();
+});
+
+Ó
+
+var app = builder.Build();
+app.MapControllers();
+app.Run();
+
+
+
+en orders.api properties en launchSettings.json agregar 
+,
+  "environmentVariables": {
+    "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "0"
+  }
+  
+  
+
+/// Opcional /// docker run -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=YourStrong!Passw0rd' -p 1433:1433 --name sqlserver_container -d mcr.microsoft.com/mssql/server:latest
+dotnet tool install --global dotnet-ef
+dotnet ef --version
+Ó
+dotnet add package Microsoft.EntityFrameworkCore.Design
+dotnet restore
+dotnet ef --version
+export PATH="$HOME/.dotnet/tools:$PATH"
+$env:Path += ";C:\Users\YourUser\.dotnet\tools"
+
+cd Orders.Api
+dotnet restore
+dotnet ef migrations add InitialCreate
+dotnet ef database update
+dotnet run
+
+
+dotnet ef migrations remove --project Orders.Infrastructure --startup-project Orders.Api
+dotnet ef migrations add InitialCreate --project Orders.Infrastructure --startup-project Orders.Api
+dotnet ef database update --project Orders.Infrastructure --startup-project Orders.Api
+
+
+dotnet ef database update 0 --project Orders.Infrastructure --startup-project Orders.Api
+dotnet ef migrations remove --project Orders.Infrastructure --startup-project Orders.Api
+dotnet ef migrations add InitialCreate --project Orders.Infrastructure --startup-project Orders.Api
+dotnet ef database update --project Orders.Infrastructure --startup-project Orders.Api
+dotnet ef database update --project Orders.Infrastructure --startup-project Orders.Api
+
+
+Si estás ejecutando el proyecto en Docker, revisa tu Dockerfile y agrega esta línea:
+
+dockerfile
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=0
+
+O si estás ejecutando localmente en Windows/Linux, exporta la variable de entorno:
+
+Windows (PowerShell):
+$env:DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=0
+
+Linux/macOS (Terminal):
+export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=0
+
+Después de esto, intenta nuevamente:
+dotnet ef migrations remove --project Orders.Infrastructure --startup-project Orders.Api
+
+
+
+***************************************************************************************************************
+***************************************************************************************************************
+Front
+
+npx create-react-app orders-frontend
+cd orders-frontend
+npm install bootstrap axios react-router-dom
+
+
+
+
+📁 src/
+    📁 components/ → Componentes reutilizables
+    📁 pages/ → Páginas principales (List, Create, Edit)
+    📁 context/ → Estado global con Context API
+    📁 services/ → Lógica para consumo de API
+
+
+
+src/index.js
+
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+import App from "./App";
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(
+  <BrowserRouter>
+    <App />
+  </BrowserRouter>
+);
+
+
+
+📄 src/context/OrderContext.js
+import { createContext, useState, useEffect } from "react";
+import axios from "axios";
+import { BASE_URL } from "../constants";
+
+export const OrderContext = createContext();
+
+export const OrderProvider = ({ children }) => {
+  const [orders, setOrders] = useState([]);
+
+  useEffect(() => {
+    axios.get(BASE_URL + "/api/orders")
+      .then((response) => setOrders(response.data))
+      .catch((error) => console.error(error));
+  }, []);
+
+  const addOrder = async (order) => {
+    const response = await axios.post(BASE_URL + "/api/orders", order);
+    setOrders([...orders, response.data]);
+  };
+
+  const updateOrder = async (id, updatedOrder) => {
+    await axios.put(BASE_URL + `/api/orders/${id}`, updatedOrder);
+    setOrders(orders.map(order => order.ID === id ? updatedOrder : order));
+  };
+
+  const deleteOrder = async (id) => {
+    await axios.delete(BASE_URL + `/api/orders/${id}`);
+    setOrders(orders.filter(order => order.ID !== id));
+  };
+
+  return (
+    <OrderContext.Provider value={{ orders, addOrder, updateOrder, deleteOrder }}>
+      {children}
+    </OrderContext.Provider>
+  );
+};
+
+
+📄 src/pages/OrderList.js (Listar y Eliminar órdenes)
+
+import { useContext } from "react";
+import { OrderContext } from "../context/OrderContext";
+import { Link } from "react-router-dom";
+import "../css/OrderList.css";
+
+function OrderList() {
+  const { orders, deleteOrder } = useContext(OrderContext);
+
+  return (
+    <div className="container mt-4">
+      <h2 className="text-center mb-4">📋 Lista de Órdenes</h2>
+      
+      <div className="d-flex flex-column flex-md-row justify-content-between align-items-center mb-3">
+        <span className="order-count">📦 Total órdenes: {orders.length}</span>
+        <Link to="/create" className="btn btn-success">
+          ➕ Crear Orden
+        </Link>
+      </div>
+
+      <div className="table-responsive">
+        <table className="table table-striped table-hover shadow rounded">
+          <thead className="table-dark">
+            <tr>
+              <th>ID</th>
+              <th>Cliente</th>
+              <th>Monto</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.length > 0 ? (
+              orders.map((order) => (
+                <tr key={order.id}>
+                  <td>{order.id}</td>
+                  <td>{order.client?.name || "Sin cliente"}</td>
+                  <td>${order.monto ? order.monto.toFixed(2) : "0.00"}</td>
+                  <td>
+                    <div className="btn-group">
+                      <Link to={`/edit/${order.id}`} className="btn btn-warning btn-sm">
+                        ✏️ Editar
+                      </Link>
+                      <button 
+                        onClick={() => deleteOrder(order.id)} 
+                        className="btn btn-danger btn-sm"
+                      >
+                        🗑️ Eliminar
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan="4" className="text-center text-muted">No hay órdenes registradas.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+export default OrderList;
+
+
+
+📄 src/pages/CreateOrder.js (Crear Orden)
+
+import { useState, useContext } from "react";
+import { OrderContext } from "../context/OrderContext";
+import { useNavigate } from "react-router-dom";
+import "../css/CreateOrder.css";
+
+function CreateOrder() {
+  const [formData, setFormData] = useState({ ClienteID: "", Monto: "" });
+  const [errors, setErrors] = useState({});
+  const { addOrder } = useContext(OrderContext);
+  const navigate = useNavigate();
+
+  const validateForm = () => {
+    let newErrors = {};
+
+    if (!formData.ClienteID) {
+      newErrors.ClienteID = "El ID del cliente es obligatorio.";
+    } else if (isNaN(formData.ClienteID)) {
+      newErrors.ClienteID = "Debe ser un número válido.";
+    }
+
+    if (!formData.Monto) {
+      newErrors.Monto = "El monto es obligatorio.";
+    } else if (formData.Monto <= 0) {
+      newErrors.Monto = "El monto debe ser mayor que 0.";
+    }
+
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleChange = (e) => {
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!validateForm()) return;
+
+    await addOrder(formData);
+    navigate("/");
+  };
+
+  return (
+    <div className="container create-order mt-5">
+      <h2 className="text-center mb-4">📝 Crear Nueva Orden</h2>
+      <form onSubmit={handleSubmit} className="order-form">
+        <div className="mb-3">
+          <label>Cliente ID:</label>
+          <input
+            type="text"
+            name="ClienteID"
+            className={`form-control ${errors.ClienteID ? "is-invalid" : ""}`}
+            onChange={handleChange}
+            required
+          />
+          {errors.ClienteID && <div className="invalid-feedback">{errors.ClienteID}</div>}
+        </div>
+        <div className="mb-3">
+          <label>Monto:</label>
+          <input
+            type="number"
+            name="Monto"
+            className={`form-control ${errors.Monto ? "is-invalid" : ""}`}
+            onChange={handleChange}
+            required
+          />
+          {errors.Monto && <div className="invalid-feedback">{errors.Monto}</div>}
+        </div>
+        <div className="btn-group d-flex">
+          <button type="submit" className="btn btn-primary flex-fill">💾 Guardar</button>
+          <button type="button" className="btn btn-secondary flex-fill" onClick={() => navigate("/")}>🔙 Volver</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+export default CreateOrder;
+
+
+
+
+📄 src/pages/EditOrder.js (Actualizar Orden)
+
+import { useState, useContext, useEffect } from "react";
+import { OrderContext } from "../context/OrderContext";
+import { useNavigate, useParams } from "react-router-dom";
+
+function EditOrder() {
+  const { orders, updateOrder } = useContext(OrderContext);
+  const { id } = useParams();
+  const navigate = useNavigate();
+
+  const orderToEdit = orders.find(order => order.ID === parseInt(id));
+  const [formData, setFormData] = useState(orderToEdit || { ClienteID: "", Monto: "" });
+
+  useEffect(() => {
+    if (!orderToEdit) navigate("/");
+  }, [orderToEdit, navigate]);
+
+  const handleChange = (e) => {
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    await updateOrder(id, formData);
+    navigate("/");
+  };
+
+  return (
+    <div className="container mt-5">
+      <h2>Editar Orden</h2>
+      <form onSubmit={handleSubmit}>
+        <div className="mb-3">
+          <label>Cliente ID:</label>
+          <input type="number" name="ClienteID" className="form-control" value={formData.ClienteID} onChange={handleChange} required />
+        </div>
+        <div className="mb-3">
+          <label>Monto:</label>
+          <input type="number" name="Monto" className="form-control" value={formData.Monto} onChange={handleChange} required />
+        </div>
+        <button type="submit" className="btn btn-primary">Actualizar</button>
+      </form>
+    </div>
+  );
+}
+
+export default EditOrder;
+
+
+
+📄 src/App.js
+
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import OrderList from './pages/OrderList';
+
+function App() {
+  return (
+      <Routes>
+        <Route path="/" element={<OrderList />} />
+      </Routes>
+  );
+}
+export default App;
+
+src/constants.js
+export const BASE_URL = "https://localhost:7072";
+
+
+/* Contenedor principal */
+.container {
+    max-width: 100%;
+    padding: 15px;
+  }
+  
+  /* Título */
+  h2 {
+    font-weight: bold;
+    color: #343a40;
+  }
+  
+  /* Contador de órdenes */
+  .order-count {
+    font-size: 1.2rem;
+    font-weight: bold;
+    color: #555;
+  }
+  
+  /* Botón de crear */
+  .btn-success {
+    font-size: 1rem;
+    padding: 8px 12px;
+  }
+  
+  /* Tabla responsiva */
+  .table {
+    width: 100%;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  
+  /* Estilos de la tabla */
+  .table thead {
+    background-color: #343a40;
+    color: white;
+  }
+  
+  .table td, .table th {
+    text-align: center;
+    vertical-align: middle;
+  }
+  
+  /* Botones */
+  .btn-group {
+    display: flex;
+    gap: 5px;
+  }
+  
+  /* Media query para pantallas pequeñas */
+  @media (max-width: 768px) {
+    .d-flex {
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+    }
+  
+    .btn-group {
+      flex-direction: column;
+      align-items: center;
+    }
+  
+    .btn {
+      width: 100%;
+    }
+  }
+  
+  
+*************
+
+/* Estilos generales */
+.create-order {
+    max-width: 500px;
+    background: #ffffff;
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.1);
+  }
+  
+  /* Título */
+  h2 {
+    font-weight: bold;
+    color: #343a40;
+  }
+  
+  /* Estilos de los inputs */
+  .form-control {
+    font-size: 1rem;
+    padding: 10px;
+    border-radius: 5px;
+  }
+  
+  /* Campos inválidos */
+  .is-invalid {
+    border-color: #dc3545;
+  }
+  
+  /* Mensajes de error */
+  .invalid-feedback {
+    color: #dc3545;
+    font-size: 0.9rem;
+    margin-top: 5px;
+  }
+  
+  /* Botones */
+  .btn-group {
+    gap: 10px;
+  }
+  
+  .btn-primary {
+    background-color: #007bff;
+    border: none;
+  }
+  
+  .btn-secondary {
+    background-color: #6c757d;
+    border: none;
+  }
+  
+  /* Diseño responsivo */
+  @media (max-width: 768px) {
+    .create-order {
+      width: 90%;
+      margin: auto;
+    }
+  
+    .btn-group {
+      flex-direction: column;
+    }
+  
+    .btn {
+      width: 100%;
+    }
+  }
+  
+  
+dotnet ef migrations add FixOrderIdType --project Orders.Infrastructure --startup-project Orders.Api
+dotnet ef database update --project Orders.Infrastructure --startup-project Orders.Api
+
+
